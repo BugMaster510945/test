@@ -1,0 +1,160 @@
+name: Build Release Artifacts
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-go:
+    strategy:
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            artifact_name: go-binaries-linux-windows
+            platforms: linux/amd64 linux/arm64 linux/arm/v7 windows/amd64
+          - runner: macos-latest
+            artifact_name: go-binaries-macos
+            platforms: darwin/amd64 darwin/arm64
+
+    runs-on: ${{ matrix.runner }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Compute build version
+        id: vars
+        run: |
+          if [[ "${GITHUB_EVENT_NAME}" == "release" ]]; then
+            version="${GITHUB_REF_NAME#v}"
+          else
+            sha="$(git rev-parse --short HEAD)"
+            ts="$(date -u +%Y%m%d%H%M%S)"
+            version="0.0.0-dev-${ts}-${sha}"
+          fi
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+
+      - name: Build multi-arch Go binaries via Makefile
+        run: make dist VERSION="${{ steps.vars.outputs.version }}" PLATFORMS="${{ matrix.platforms }}"
+
+      - name: Upload Go binaries artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: dist/*
+          if-no-files-found: error
+
+  build-debian-trixie:
+    # GitHub Free friendly default:
+    # - Uses only ubuntu-latest (widely available runner)
+    # - Builds Debian package for amd64
+    #
+    # ARM64 options (uncomment one strategy if available to you):
+    # 1) GitHub-hosted ARM runner (may not be available depending on plan/repo settings):
+    #    - arch: arm64
+    #      runner: ubuntu-24.04-arm
+    # 2) Self-hosted ARM64 runner:
+    #    - arch: arm64
+    #      runner: [self-hosted, linux, arm64]
+    strategy:
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+
+    runs-on: ${{ matrix.runner }}
+    container: debian:trixie
+
+    steps:
+      # Keep CI costs/minutes reasonable on GitHub Free:
+      # install only bootstrap tools, then resolve Build-Depends from debian/control.
+      - name: Install bootstrap tools
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            build-essential ca-certificates git make dpkg-dev devscripts equivs fakeroot
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Debian Build-Depends from control
+        run: |
+          DEBIAN_FRONTEND=noninteractive mk-build-deps \
+            --install --remove \
+            --tool 'apt-get -y --no-install-recommends' \
+            debian/control
+
+      - name: Compute Debian version and changelog message
+        id: vars
+        run: |
+          if [[ "${GITHUB_EVENT_NAME}" == "release" ]]; then
+            raw="${GITHUB_REF_NAME#v}"
+            deb_version="${raw}-1"
+            changelog_msg="Release ${GITHUB_REF_NAME}"
+          else
+            sha="$(git rev-parse --short HEAD)"
+            ts="$(date -u +%Y%m%d%H%M%S)"
+            deb_version="0.0.0~git${ts}.${sha}-1"
+            changelog_msg="Snapshot ${sha}"
+          fi
+
+          echo "deb_version=${deb_version}" >> "$GITHUB_OUTPUT"
+          echo "changelog_msg=${changelog_msg}" >> "$GITHUB_OUTPUT"
+
+      - name: Build Debian package via Makefile
+        run: |
+          make deb \
+            DEB_VERSION="${{ steps.vars.outputs.deb_version }}" \
+            DEB_DIST="trixie" \
+            CHANGELOG_MSG="${{ steps.vars.outputs.changelog_msg }}" \
+            MAINTAINER_NAME="${GITHUB_ACTOR}" \
+            MAINTAINER_EMAIL="${GITHUB_ACTOR}@users.noreply.github.com"
+
+      - name: Collect Debian package artifacts
+        run: |
+          mkdir -p release-assets
+          find "${GITHUB_WORKSPACE}/.." -maxdepth 3 -type f -name '*.deb' -print -exec cp {} release-assets/ \;
+
+      - name: Upload Debian package artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: deb-packages-${{ matrix.arch }}
+          path: release-assets/*.deb
+          if-no-files-found: error
+
+  publish-release-assets:
+    if: ${{ github.event_name == 'release' }}
+    needs:
+      - build-go
+      - build-debian-trixie
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download Go binaries
+        uses: actions/download-artifact@v4
+        with:
+          pattern: go-binaries-*
+          merge-multiple: true
+          path: release-assets
+
+      - name: Download Debian packages
+        uses: actions/download-artifact@v4
+        with:
+          pattern: deb-packages-*
+          merge-multiple: true
+          path: release-assets
+
+      - name: Attach artifacts to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            release-assets/*

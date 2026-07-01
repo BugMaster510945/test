@@ -1,0 +1,11 @@
+#!/usr/bin/make -f
+
+include /usr/share/dpkg/architecture.mk
+
+export DH_GOLANG_INSTALL_ALL := 1
+
+%:
+	dh $@ --buildsystem=golang --with=golang
+
+override_dh_auto_install:
+	install -D -m 0755 $(CURDIR)/obj-$(DEB_HOST_GNU_TYPE)/bin/hello $(CURDIR)/debian/hello/usr/bin/hello

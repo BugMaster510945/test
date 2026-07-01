@@ -1,0 +1,15 @@
+Source: hello
+Section: golang
+Priority: optional
+Maintainer: Test Maintainer <maintainer@example.com>
+Build-Depends: debhelper-compat (= 13), dh-golang, golang-any
+Standards-Version: 4.7.0
+Rules-Requires-Root: no
+Homepage: https://example.com/hello
+XS-Go-Import-Path: example.com/hello
+
+Package: hello
+Architecture: any
+Depends: ${misc:Depends}, ${shlibs:Depends}
+Description: Simple Hello World program written in Go
+ A tiny command-line program that prints "Hello, world!".
